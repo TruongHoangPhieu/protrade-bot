@@ -8,11 +8,17 @@ const axios = require('axios');
 const { RSI, MACD, BollingerBands } = require('technicalindicators');
 
 const app = express();
+
+// --- CẤU HÌNH CORS NÂNG CẤP ĐỂ THÔNG SUỐT DỮ LIỆU SANG NETLIFY ---
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type']
 }));
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
 // Cấu hình Telegram
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: false });
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -37,7 +43,7 @@ function sendTelegramAlert(signal) {
     bot.sendMessage(CHAT_ID, text, { parse_mode: 'Markdown' }).catch(() => {});
 }
 
-// --- DANH SÁCH COIN CHUẨN (ĐÃ LOẠI BỎ CẶP PI LỖI ĐỂ TRÁNH LỆCH GIÁ) ---
+// --- DANH SÁCH COIN CHUẨN ---
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
 
 // Endpoint cung cấp dữ liệu nến cho App vẽ biểu đồ
@@ -98,10 +104,10 @@ async function scanner() {
 setInterval(scanner, 60000);
 scanner();
 
-app.get('/', (req, res) => res.send('ProTrade Bot v3.0 - Real Chart & Fix Port Ready! 🚀'));
+app.get('/', (req, res) => res.send('ProTrade Bot v3.0 - Real Chart & CORS Fix Ready! 🚀'));
 
-// --- SỬA LỖI CỔNG ĐỂ RENDER THÔNG MẠNG 100% ---
-const PORT = process.env.PORT || 3000;
+// --- SỬA LỖI CỔNG ĐỂ RENDER THÔNG MẠNG ---
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is listening on port ${PORT}`);
 });
