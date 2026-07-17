@@ -4,7 +4,8 @@ const cors = require('cors');
 const http = require('http');
 const WebSocket = require('ws');
 const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios'); // Thư viện gọi API
+const axios = require('axios');
+const { RSI, MACD, BollingerBands } = require('technicalindicators');
 
 const app = express();
 app.use(cors());
@@ -15,102 +16,122 @@ const wss = new WebSocket.Server({ server });
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: false });
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// Lưu trữ clients kết nối
+// Quản lý kết nối App
 const clients = new Set();
 wss.on('connection', (ws) => {
     clients.add(ws);
-    console.log('Client connected');
     ws.on('close', () => clients.delete(ws));
 });
 
 function broadcast(data) {
     clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(data));
-        }
+        if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(data));
     });
 }
 
 function sendTelegramAlert(signal) {
     if (!CHAT_ID) return;
     const emoji = signal.type === 'BUY' ? '🟢' : '🔴';
-    const text = `
-${emoji} *TÍN HIỆU ${signal.type}* ${emoji}
-📊 *Cặp:* ${signal.symbol}
-💰 *Giá thực:* $${signal.price}
-🎯 *Stop Loss:* $${signal.stopLoss}
-🏁 *Take Profit:* $${signal.takeProfit}
-⏰ *Lúc:* ${new Date().toLocaleTimeString('vi-VN')}
-    `;
+    const text = `${emoji} *TÍN HIỆU ${signal.type} - ${signal.symbol}*
+💰 Giá: $${signal.price}
+🎯 SL: $${signal.stopLoss} | TP: $${signal.takeProfit}
+📊 *Phân tích:*
+• RSI(14): ${signal.indicators.rsi}
+• MACD: ${signal.indicators.macdSignal}
+• BB: ${signal.indicators.bbPosition}
+💡 Lý do: ${signal.reason}`;
     bot.sendMessage(CHAT_ID, text, { parse_mode: 'Markdown' });
 }
 
-// --- KẾT NỐI DỮ LIỆU THỰC TẾ TỪ BINANCE ---
+// --- PHÂN TÍCH KỸ THUẬT CHUYÊN SÂU ---
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
-let priceCache = {}; // Lưu giá lần trước để so sánh xu hướng ngắn hạn
 
-async function analyzeMarket() {
+async function getKlines(symbol, interval = '1h', limit = 100) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const res = await axios.get(url);
+    // Trả về mảng giá đóng cửa (Close Price)
+    return res.data.map(k => parseFloat(k[4]));
+}
+
+async function analyzeSymbol(symbol) {
     try {
-        // Lấy giá ticker 24h từ Binance (Miễn phí, không cần API Key)
-        const response = await axios.get('https://api.binance.com/api/v3/ticker/24hr');
-        const tickers = response.data.filter(t => SYMBOLS.includes(t.symbol));
+        const closes = await getKlines(symbol);
+        const currentPrice = closes[closes.length - 1];
 
-        for (const ticker of tickers) {
-            const currentPrice = parseFloat(ticker.lastPrice);
-            const priceChangePercent = parseFloat(ticker.priceChangePercent);
-            const prevPrice = priceCache[ticker.symbol] || currentPrice;
-            
-            // Cập nhật cache
-            priceCache[ticker.symbol] = currentPrice;
+        // 1. Tính RSI (14 chu kỳ)
+        const rsiValues = RSI.calculate({ values: closes, period: 14 });
+        const rsi = rsiValues[rsiValues.length - 1];
 
-            // LOGIC PHÂN TÍCH ĐƠN GIẢN DỰA TRÊN BIẾN ĐỘNG THỰC
-            // Nếu giá giảm mạnh > 2% trong 24h -> Tín hiệu MUA bắt đáy
-            // Nếu giá tăng mạnh > 2% trong 24h -> Tín hiệu BÁN chốt lời
-            let signalType = null;
-            let reason = '';
+        // 2. Tính MACD
+        const macdValues = MACD.calculate({ 
+            values: closes, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: true, SimpleMASignal: true 
+        });
+        const macd = macdValues[macdValues.length - 1];
 
-            if (priceChangePercent < -2.0) {
-                signalType = 'BUY';
-                reason = `Giảm mạnh ${priceChangePercent.toFixed(2)}% - Vùng hỗ trợ`;
-            } else if (priceChangePercent > 2.0) {
-                signalType = 'SELL';
-                reason = `Tăng nóng ${priceChangePercent.toFixed(2)}% - Vùng kháng cự`;
-            }
+        // 3. Tính Bollinger Bands
+        const bbValues = BollingerBands.calculate({ values: closes, period: 20, stdDev: 2 });
+        const bb = bbValues[bbValues.length - 1];
 
-            // Chỉ gửi tín hiệu khi có điều kiện rõ ràng
-            if (signalType) {
-                const slMultiplier = signalType === 'BUY' ? 0.98 : 1.02;
-                const tpMultiplier = signalType === 'BUY' ? 1.05 : 0.95;
+        // --- LOGIC ĐỒNG THUẬN TÍN HIỆU ---
+        let buyScore = 0;
+        let sellScore = 0;
+        let reasons = [];
 
-                const signal = {
-                    type: signalType,
-                    symbol: ticker.symbol,
-                    price: currentPrice.toFixed(2),
-                    stopLoss: (currentPrice * slMultiplier).toFixed(2),
-                    takeProfit: (currentPrice * tpMultiplier).toFixed(2),
-                    reason: reason
-                };
+        // RSI: < 30 (Quá bán), > 70 (Quá mua)
+        if (rsi < 30) { buyScore++; reasons.push(`RSI quá bán (${rsi.toFixed(1)})`); }
+        else if (rsi > 70) { sellScore++; reasons.push(`RSI quá mua (${rsi.toFixed(1)})`); }
 
-                broadcast({ type: 'SIGNAL', data: signal });
-                sendTelegramAlert(signal);
-                console.log(`[REAL] Signal: ${signalType} ${ticker.symbol} @ $${currentPrice}`);
-            }
+        // MACD: Histogram dương & MACD cắt lên Signal -> Mua
+        if (macd.histogram > 0 && macd.MACD > macd.signal) { buyScore++; reasons.push('MACD Bullish Cross'); }
+        else if (macd.histogram < 0 && macd.MACD < macd.signal) { sellScore++; reasons.push('MACD Bearish Cross'); }
+
+        // Bollinger Bands: Chạm/Gãy băng dưới -> Mua, Chạm/Gãy băng trên -> Bán
+        if (currentPrice <= bb.lower) { buyScore++; reasons.push('Chạm dải BB dưới'); }
+        else if (currentPrice >= bb.upper) { sellScore++; reasons.push('Chạm dải BB trên'); }
+
+        // Chỉ phát tín hiệu khi có ít nhất 2/3 chỉ báo đồng thuận
+        let signalType = null;
+        if (buyScore >= 2) signalType = 'BUY';
+        else if (sellScore >= 2) signalType = 'SELL';
+
+        if (signalType) {
+            const slMult = signalType === 'BUY' ? 0.97 : 1.03; // SL 3%
+            const tpMult = signalType === 'BUY' ? 1.06 : 0.94; // TP 6% (Tỷ lệ R:R = 1:2)
+
+            const signal = {
+                type: signalType,
+                symbol: symbol,
+                price: currentPrice.toFixed(2),
+                stopLoss: (currentPrice * slMult).toFixed(2),
+                takeProfit: (currentPrice * tpMult).toFixed(2),
+                reason: reasons.join(' + '),
+                indicators: {
+                    rsi: rsi.toFixed(1),
+                    macdSignal: macd.histogram > 0 ? 'Tăng 📈' : 'Giảm 📉',
+                    bbPosition: currentPrice <= bb.lower ? 'Vùng thấp' : (currentPrice >= bb.upper ? 'Vùng cao' : 'Trung bình')
+                }
+            };
+
+            broadcast({ type: 'SIGNAL', data: signal });
+            sendTelegramAlert(signal);
+            console.log(`[TA] ${signalType} ${symbol} @ $${currentPrice} | Score: Buy=${buyScore}, Sell=${sellScore}`);
         }
-    } catch (error) {
-        console.error('Lỗi lấy dữ liệu Binance:', error.message);
+    } catch (err) {
+        console.error(`Lỗi phân tích ${symbol}:`, err.message);
     }
 }
 
-// Chạy phân tích mỗi 60 giây
-setInterval(analyzeMarket, 60000);
-// Chạy ngay lần đầu khi khởi động
-analyzeMarket();
+// Vòng lặp quét toàn bộ danh sách coin mỗi 60 giây
+async function marketScanner() {
+    for (const symbol of SYMBOLS) {
+        await analyzeSymbol(symbol);
+        await new Promise(r => setTimeout(r, 200)); // Delay nhẹ tránh bị Binance rate-limit
+    }
+}
 
-app.get('/', (req, res) => {
-    res.send('ProTrade Bot REAL DATA is Running! 🚀');
-});
+setInterval(marketScanner, 60000);
+marketScanner(); // Chạy ngay khi khởi động
 
+app.get('/', (req, res) => res.send('ProTrade Bot TA Engine is Live! 🧠📊'));
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
