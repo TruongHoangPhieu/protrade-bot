@@ -36,8 +36,8 @@ function sendTelegramAlert(signal) {
     bot.sendMessage(CHAT_ID, text, { parse_mode: 'Markdown' }).catch(() => {});
 }
 
-// --- DANH SÁCH COIN (ĐÃ THÊM PI) ---
-const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'PIUSDT', 'DOGEUSDT'];
+// --- DANH SÁCH COIN CHUẨN (ĐÃ LOẠI BỎ CẶP PI LỖI ĐỂ TRÁNH LỆCH GIÁ) ---
+const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
 
 // Endpoint cung cấp dữ liệu nến cho App vẽ biểu đồ
 app.get('/api/klines/:symbol', async (req, res) => {
@@ -47,7 +47,6 @@ app.get('/api/klines/:symbol', async (req, res) => {
         const limit = req.query.limit || 100;
         const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
         const { data } = await axios.get(url);
-        // Format: [time, open, high, low, close, volume]
         const klines = data.map(k => ({
             time: k[0], open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5]
         }));
@@ -66,7 +65,7 @@ async function getKlines(symbol) {
 
 async function analyzeSymbol(symbol) {
     const closes = await getKlines(symbol);
-    if (!closes || closes.length < 30) return; // Skip nếu không có dữ liệu (ví dụ PI chưa list)
+    if (!closes || closes.length < 30) return;
 
     const price = closes[closes.length - 1];
     const rsi = RSI.calculate({ values: closes, period: 14 }).pop();
@@ -98,5 +97,10 @@ async function scanner() {
 setInterval(scanner, 60000);
 scanner();
 
-app.get('/', (req, res) => res.send('ProTrade Bot v3.0 - Real Chart & PI Ready! 🚀'));
-server.listen(process.env.PORT || 3000);
+app.get('/', (req, res) => res.send('ProTrade Bot v3.0 - Real Chart & Fix Port Ready! 🚀'));
+
+// --- SỬA LỖI CỔNG ĐỂ RENDER THÔNG MẠNG 100% ---
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is listening on port ${PORT}`);
+});
