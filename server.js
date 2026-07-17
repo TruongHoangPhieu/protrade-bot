@@ -8,10 +8,11 @@ const axios = require('axios');
 const { RSI, MACD, BollingerBands } = require('technicalindicators');
 
 const app = express();
-app.use(cors());
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
 // Cấu hình Telegram
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: false });
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
